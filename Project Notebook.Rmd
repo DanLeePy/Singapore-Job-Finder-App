@@ -1,0 +1,388 @@
+---
+title:
+output:
+  html_notebook: default
+  html_document:
+    df_print: paged
+---
+
+## App Link: https://stefansantoso.shinyapps.io/project_v2/
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Case Description
+
+
+### Business Problem
+.	Singapore 3rd Quarter Jobless Rate Highest in Almost A Decade
+
+.	Singapore's unemployment rate is 2.3% in Sep 2019, the highest since the fourth quarter 2009.
+
+.	The increase in unemployment rates occurred as more workers were retrenched. 
+
+.	There are still job vacancies available, suggesting some mismatch in the labour market
+
+
+Job seekers having difficulty finding the ideal job and industry for them. Furthermore even after finding the ideal industry and job, they have issues crafting suitable resumes for the different industries and companies that they are applying too.  
+
+
+### Current Market Practice 
+Job seekers craft weak and over generalised resumes and often apply for jobs that are not a suitable match for them.
+
+### Project Objective
+
+.	Support Job Seekers who are having difficulties crafting suitable resumes for specific companies and industries by providing suggestions on the desirable keywords for Job Seekers to include in their resume when targeting specific companies. 
+
+.	Help job seekers find the most ideal jobs to apply for that best suits their profile through different means 
+
+### Metholodogy
+
+1) Using Geospatial Analytics to map the current job openings in Singapore by the different industries 
+2) Provide desirable keywords for Job Seekers to state in their resume based on the Term Frequency - Inverse Document Frequency weights of the Terms within the Job Descriptions
+3) Utilising Cosine Similarity and Word Embeddings to match the most suited job to a job seeker based on the ideal job description he inputs
+4) Provide a suitability score for each of the jobs for the job seeker based on the Cosine Similarity score calculated between the Job Descriptions and the job seeker's CV
+
+
+# Text Analytics to Identify the Top Words to Enter in your Resume
+
+### Loading libraries and data
+```{r}
+library(dplyr)
+library(stringr)
+library(tidytext)
+library(tidyr)
+library(tm)
+library(tibble)
+library(wordcloud)
+library(ggplot2)
+
+data <- read.csv("final_v2.csv")
+
+```
+
+### Text processing & subsetting data
+```{r}
+data <- mutate_all(data, funs(tolower))
+#data <- data[data['company_industry']=='banking',]
+df <- subset(data, select=c(company_industry, company_name, job_desc, job_location, position_title, years_of_experience))
+
+df$job_desc <- iconv(df$job_desc, "UTF-8", "UTF-8",sub=' ') 
+
+```
+
+### Focusing on the job descriptions, as they contain the most text and information. Using the tm package to create a corpus from the job descriptions
+
+```{r}
+corpus <- SimpleCorpus(VectorSource(df[1:20000,"job_desc"]))
+corpus <- tm_map(corpus, stripWhitespace)
+corpus <- tm_map(corpus, removeWords, stopwords("english"))
+```
+
+### Re-iterate after getting the top words, and add some of these words to "new_stops" to be removed
+```{r}
+new_stops <- c("candidates", "please", "must", "work", "email", "will", "year", "job", 
+               "day", "may", "pte", "including","shortlisted", "least", "resume","office", 
+               "new","ensure", "possess", "required","able")
+
+corpus <- tm_map(corpus, removeWords, new_stops)
+DTM <- DocumentTermMatrix(corpus)
+
+inspect(DTM)
+```
+
+### Using TF-IDF (Term frequency-Inverse document frequency) to examine the relevance of words to documents in corpus.
+```{r}
+tdm = TermDocumentMatrix(corpus,control = list(weighting = weightTfIdf,
+                                               removePunctuation = T,
+                                               removeNumbers = T,
+                                               stemming = F))
+freq=rowSums(as.matrix(tdm))
+```
+
+### Plotting the summed TF-IDF scores of all terms by their rank
+
+```{r}
+plot(sort(freq, decreasing = T),col="blue",main="Summed TF-IDF Score Across TF-IDF based ranks", xlab="TF-IDF-based rank", ylab = "Summed TF-IDF Score")
+
+high.freq=tail(sort(freq),n=30)
+hfp.df=as.data.frame(sort(high.freq))
+hfp.df$names <- rownames(hfp.df) 
+```
+
+### Barplot to show the Terms with the top Summed TF-IDF Score
+```{r}
+ggplot(hfp.df, aes(reorder(names,high.freq), high.freq)) +
+  geom_bar(stat="identity") + coord_flip() + 
+  xlab("Terms") + ylab("Summed TF-IDF Score") +
+  ggtitle("Summed TF-IDF Score Across the Top Terms")
+```
+
+### Another way of illustrating the highest terms with highest TF-IDF scores - word cloud
+```{r}
+wordcloud(words = hfp.df$names, freq = high.freq,
+         random.order=FALSE, rot.per=0.2, 
+         colors=brewer.pal(8, "Dark2"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Calculating the Job Suitability using Word Embeddings
+
+### Libraries and pre-trained Word2Vec Word Embeddings Used
+
+```{r}
+library(softmaxreg)
+library(session)
+library(lsa)
+library(dplyr)
+library(coop)
+data(word2vec)
+```
+
+### Reading in the scraped job data
+
+#### Making all characters lower case for standardisation purposes
+#### Removing foreign non UTF-8 characters
+
+```{r}
+data <- read.csv("final_v2.csv")
+data <- mutate_all(data, funs(tolower))
+data$job_desc <- iconv(data$job_desc, "UTF-8", "UTF-8",sub=' ') 
+data$company_overview <- iconv(data$company_overview, "UTF-8", "UTF-8",sub=' ') 
+data$position_title <- iconv(data$position_title, "UTF-8", "UTF-8",sub=' ') 
+```
+
+
+### Creating a Matrix that stores the word vectors of each of the 83773 Job Descriptions
+
+```{r}
+N <- length(data$job_desc)
+jddata <- data.frame(matrix(ncol = 20, nrow = N))
+
+for(i in 1:N){
+  jddoc <- data[i,"job_desc"]
+  jdVectors <-  wordEmbed(jddoc, word2vec, meanVec = TRUE)
+  jddata[i,] = c(jdVectors)
+}
+```
+
+
+### Matching the desired job description against the best suited job from the database of 83773 jobs
+
+#### Create a word vector of the custom job description input "Machine Learning Software Engineer"
+#### Using Cosine Similarity, find the best suited job based on the job description that has the highest Cosine Similarity score with the custom job description input
+
+#### Company, Job Position and Job Description of the best suited job is printed out
+
+```{r}
+jdinput <- "Machine Learning Software Engineer"
+jdinput <- tolower(jdinput)
+jdVector <-  c(wordEmbed(jdinput, word2vec, meanVec = TRUE))
+
+
+cos_func <- function(x){
+  result <- cosine(as.numeric(jddata[x,]), jdVector)
+  return(result)
+}
+
+index <- which.max(sapply(1:N, cos_func))
+
+print(paste("Company:", data[index, "company_name"]))
+print(paste("Job Position:", data[index, "position_title"]))
+print(paste("Job Description:", data[index, "job_desc"]))
+```
+
+### Storing the Cosine Similarity Scores of the custom job description input and all the 83773 jobs into a vector, to be used by the app later on to provide a suitability score for a job seeker and each of the 83773 jobs
+
+```{r}
+scoretable <- sapply(1:N, cos_func)
+scoretable[100]
+```
+
+
+### Saving the session for quick usage in the app
+
+```{r}
+save.session(file="Project2.Rda")
+```
+
+
+# Shiny App Server
+
+Now, we will be going through the calculations involved in setting up the backend of our Dashboard
+
+
+
+## Load Dataset
+First of all, we load the the cleaned csv file as our main dataset. We then perform some further data manipulation to obtain the timestamps of the dates each job was opened and when it would close. We named these columns `post_datetime` and `close_datetime`
+```{r eval=FALSE}
+jobstreet_data <- read.csv('final_v2.csv')
+
+### Create new columns for timestamp of post and close dates
+jobstreet_data[['post_datetime']] <- as.Date(jobstreet_data[['post_date']], format='%d-%B-%Y')
+jobstreet_data[['close_datetime']] <- as.Date(jobstreet_data[['close_date']], format='%d-%B-%Y')
+```
+
+## 1st Feature : Overview
+This feature is made up of 3 components:                                                                                                        
+  (1) Number of posted vs Time                                                                                                                     (2) Number of open jobs vs Time                                                                                                                  (3) Wordcloud to display Top In-Demand Keywords
+
+
+#### To find number of POSTED jobs daily, we get an ordered list of dates in our dataset. We then filter the dataset by date and industry
+```{r eval=FALSE}
+### Get a list of dates
+dates <- unique(jobstreet_data$post_datetime)
+
+### Order list of dates
+cdates <- dates[order(dates)]
+  
+### Create a function to get the count of posted jobs in a day
+
+get_count <- function(date,industry){
+  ind <- jobstreet_data[(jobstreet_data$company_industry==industry),]
+  count <- nrow(ind[(ind$post_datetime==date),])
+  count
+}
+
+### Plot number of POSTED jobs vs time  
+plot_trend <- function(industry){
+  res <- sapply(cdates,get_count,industry)
+  df<-data.frame(x=cdates,y=res)
+  ggplot(df) + geom_line(aes(x=cdates,y=res)) +
+    labs(x = "Date", y = "Posted Jobs", title = 'Number of Posted Jobs vs Time') +
+    scale_colour_hue("clarity", l = 70, c = 150) + ggthemes::theme_few() +
+    theme(legend.direction = "horizontal", legend.position = "bottom")
+}
+```
+
+#### To find number of OPEN jobs daily, we need to create a condition of 'OPEN'. Then we filter the dataset by open condition and insutry. Open jobs of date `d` is defined as jobs whereby its                                                                                            `post_datetime` <= `d` and `d` <= `close_datetime`
+```{r eval = FALSE}
+
+### Filter jobs that are currently open, daily 
+count_filtered <- function(date,industry) {
+  filtered <- jobstreet_data[(jobstreet_data$company_industry==industry),]
+  filtered <- filtered[!(grepl('\\|',filtered$close_date)),]
+  nrow(filtered[((filtered$post_datetime <= date) & (date <= filtered$close_datetime)),])
+  }
+
+### Plot aggregated number of jobs i.e. Find number of OPEN jobs daily 
+plot_agg <- function(industry){
+  filtered <- jobstreet_data[(jobstreet_data$company_industry==industry),]
+  date_range <- seq(as.Date(min(filtered$post_datetime)), as.Date(max(filtered$post_datetime)), "days")
+  count_daily <- sapply(date_range, count_filtered, industry)
+  df<-data.frame(x=date_range,y=count_daily)
+  ggplot(df) + geom_line(aes(x=date_range,y=count_daily)) +
+    labs(x = "Date", y = "Open Jobs", title = 'Number of Open Jobs vs Time') +
+    scale_colour_hue("clarity", l = 70, c = 150) + ggthemes::theme_few() +
+    theme(legend.direction = "horizontal", legend.position = "bottom")
+}
+
+```
+
+```{r eval=FALSE}
+
+```
+
+## 2nd Feature: Maps
+Second feature that we have involves generating a map plot using the google map API as well as Ploting the longitude and latitude of filtered jobs.
+```{r eval=FALSE}
+
+### Create a reactive function that takes in industry as input and returns all longitude and latitude
+getIndustryData <- reactive( {
+    data <- as.data.frame(jobstreet_data[jobstreet_data$company_industry== input$company_industry, c("longitude", "latitude")])
+    colnames(data) <- c("long","lat")
+    data
+  })
+
+```
+
+```{r eval=FALSE}
+
+### Create a function that returns the map of Singapore with dynamic maptype such as terrain, satellite, roadmap, hybrid, etc
+getMap <- function(){
+      get_map('Singapore', zoom = 11, maptype = input$mapType)
+}
+
+### Create a function that plots the coodfinates of filtered dataset on top of the map of Singapore. 2 Options are available which are Point format or Heatmap format
+output$plotAvailability <-renderPlot({
+      if(input$format=='Point') {
+        ggmap(getMap()) +  geom_point(data=getIndustryData(), aes(x = long, y = lat),color='red',alpha=0.5) +
+          coord_fixed(ylim = c(1.24, 1.48), ratio = 1/cos(pi*1.29286/180))
+      }
+      else if (input$format == 'Heatmap'){
+        ggmap(getMap()) + stat_density2d(data=getIndustryData(), aes(x= long, y=lat,  fill = ..level.., alpha = ..level..), size = 15, geom = 'polygon')+
+          scale_fill_gradient(low = "green", high = "red", guide=FALSE) + scale_alpha(range = c(0, 1), guide = FALSE) +
+          coord_fixed(ylim = c(1.24, 1.48), ratio = 1/cos(pi*1.29286/180))
+      }
+      else {print("Wrong format name")}
+    }
+  )
+```
+
+## 3rd Feature: Resume Score
+The third feature that we have is about getting a "Resume Score" of a user's resume against a selected job listing.
+```{r eval=FALSE}
+
+### Firstly, we need to load the vector of cosine similarities using the load function.
+load("gauge_score.rda")
+
+### Create a reactive function that takes in industry as input and returns position_title and company_name columns
+getDataByIndustry <- reactive( {
+    data <- as.data.frame(jobstreet_data[jobstreet_data$company_industry== input$company_industry2, c("position_title", "company_name")])
+    data
+  })
+
+### Next, we render a DataTable displaying all jobs filtered by industry. We note that only one row can be selected at each time. 
+### The row number of the selected row will be saved in memory as `selectedRow()` using the eventReactive function
+output$mytable = DT::renderDataTable({getDataByIndustry()},selection='single',rownames=FALSE)
+  selectedRow <- eventReactive(input$mytable_rows_selected,{
+    row.names(getDataByIndustry())[c(input$mytable_rows_selected)]
+  })
+
+### We then display the score as a gauge/speedometer display by accessing the score of the user's resume in the   scoretable vector we loaded earlier
+output$gauge = renderGauge({
+  gauge(scoretable[as.numeric(selectedRow())], 
+        min = 0, 
+        max = 1, 
+        sectors = gaugeSectors(success = c(0.5, 1), 
+                               warning = c(0.3, 0.5),
+                               danger = c(0, 0.3)))
+  })
+```
+
+## 4th Feature: Job Search
+Out last function involves finding the best match of job for the user. This was done by comparing cosine similarities of the user's keywords against each job description in our dataset
+```{r eval=FALSE}
+
+getjobdata <- reactive({
+    jdinput <- tolower(input$caption)
+    jdVector <-  c(wordEmbed(jdinput, glove, meanVec = TRUE))
+    
+  cos_func <- function(x){
+    result <- cosine(as.numeric(jddata[x,]), jdVector)
+    return(result)
+    }
+    
+  index <<- which.max(sapply(1:N, cos_func))
+  return(list(data[index, "job_desc"],data[index, "position_title"], data[index, "company_name"]))
+  })
+  
+  output$value <- renderText({paste("Company:", str_to_title(getjobdata()[3], locale = "en"),
+                                    "Position:", str_to_title(getjobdata()[2], locale = "en"),
+                                    "Job Description:", str_to_sentence(getjobdata()[1], locale = "en"),
+                                    sep="\n")})
+```
